@@ -28,7 +28,8 @@
 <body>
   <h1>GeoProfile Visualizer</h1>
   <p class="note">
-    مبنای عمودی <b>Z</b> است: تراز دهانهٔ گمانه نسبت به صفر نقشه (مثبت بالاتر، منفی پایین‌تر). محاسبهٔ ارتفاع لایه‌ها:
+    مبنای عمودی <b>Z</b> (تراز نسبت به صفر نقشه) است. برای نمایش ۲بعدی، محور عمق به‌صورت «منفی رو به پایین» رسم می‌شود:
+    <code>y = −depth</code>، پس دهانهٔ گمانه در <code>y=0</code> است. هم‌چنین
     <code>TopZ = Z − TopDepth_m</code> و <code>BottomZ = Z − BottomDepth_m</code>.
   </p>
 
@@ -68,7 +69,7 @@
         <li><b>ستون‌های گمانه‌ها:</b> BoreholeID, X, Y, Z (Z نسبت به تراز صفر نقشه)</li>
         <li><b>ستون‌های لایه‌ها:</b> BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description]</li>
         <li><b>محاسبهٔ ارتفاع لایه:</b> TopZ = Z − TopDepth_m، BottomZ = Z − BottomDepth_m</li>
-        <li><b>۲D:</b> محور عمودی Z با نمایش معکوس برای دیدن عمق رو به پایین.</li>
+        <li><b>۲D:</b> عمق با علامت منفی رو به پایین (دهانه: y=0، عمق ۷ متر: y=−7)</li>
         <li><b>۳D:</b> منشور هر لایه در مختصات (X,Y) با ارتفاع بین TopZ و BottomZ.</li>
       </ul>
     </div>
@@ -77,7 +78,7 @@
   <div id="plot" class="panel"></div>
 
   <script>
-    // رنگ‌های استاندارد برای کدهای USCS (اولین جزءِ کد، مبنا قرار می‌گیرد)
+    // رنگ‌های استاندارد برای کدهای USCS
     const USCS_COLORS = {
       "GW": "#8B5A2B", "GP": "#8B5A2B",
       "SW": "#F4A460", "SP": "#F4A460",
@@ -100,7 +101,7 @@
     const modeSel = document.getElementById('modeSel');
     const colWidthInput = document.getElementById('colWidth');
 
-    // --- ابزارک‌های عمومی ---
+    // ابزارهای کمکی
     function pickColor(code) {
       if (!code) return "#CCCCCC";
       const norm = String(code).toUpperCase().replace("/", "-").split("-");
@@ -173,7 +174,7 @@
       return Math.hypot(dx, dy);
     }
 
-    // --- رویدادها ---
+    // رویدادهای بارگذاری فایل
     holesInput.addEventListener('change', async (e) => {
       statusEl.textContent = 'در حال خواندن فایل گمانه‌ها...';
       try {
@@ -219,13 +220,12 @@
       }
     });
 
-    // --- آماده‌سازی داده ---
+    // آماده‌سازی داده
     function prepareData() {
       const holes = (state.holes || []).map(h => ({
         BoreholeID: String(h.BoreholeID ?? h.boreholeid ?? h.ID ?? h.id ?? "").trim(),
         X: toNumber(h.X ?? h.x),
         Y: toNumber(h.Y ?? h.y),
-        // Z نسبت به صفر نقشه؛ درصورت مهاجرت‌نکردن کاربر، GroundLevel/Elevation هم پشتیبانی می‌شود
         Z: toNumber(h.Z ?? h.z ?? h.GroundLevel ?? h.groundlevel ?? h.Elevation ?? h.elevation)
       })).filter(h => h.BoreholeID && h.X != null && h.Y != null && h.Z != null);
 
@@ -263,11 +263,10 @@
       }
 
       if (!df.length) throw new Error('هیچ لایه‌ای با گمانه‌های معرفی‌شده تطابق پیدا نکرد.');
-
       return { holes, df };
     }
 
-    // --- چیدمان chainage با نزدیک‌ترین همسایه ---
+    // ترتیب chainage با نزدیک‌ترین همسایه
     function orderByNearestNeighbor(holes) {
       if (holes.length <= 2) return holes.map(h => h.BoreholeID);
       // شروع از چپ‌ترین (کمینه X؛ در تساوی، کمینه Y)
@@ -295,16 +294,15 @@
         order.push(best.BoreholeID);
         current = best;
       }
-      // اگر چیزی جا ماند (در عمل نباید)، اضافه کن
       for (const h of holes) if (!visited.has(h.BoreholeID)) order.push(h.BoreholeID);
       return order;
     }
 
-    // --- رسم ۲D ---
+    // رسم ۲بعدی با عمق منفی (y=-depth)
     function render2D(holes, df) {
       const mode = layoutModeSel.value; // x, y, chainage
 
-      // تعیین ترتیب گمانه‌ها برای محور افقی
+      // ترتیب گمانه‌ها روی محور افقی
       let orderedIDs;
       if (mode === 'chainage') {
         orderedIDs = orderByNearestNeighbor(holes);
@@ -315,7 +313,7 @@
           .map(h => h.BoreholeID);
       }
 
-      // محاسبهٔ موقعیت افقی (Xplot)
+      // موقعیت افقی نمایش
       const chainages = new Map();
       const minX = Math.min(...holes.map(h => h.X));
       const minY = Math.min(...holes.map(h => h.Y));
@@ -338,27 +336,34 @@
       const traces = [];
       const width = Math.max(5, Math.min(50, Number(colWidthInput.value) || 10));
 
+      // پایین‌ترین عمق (منفی‌ترین y)
+      let minNegDepth = 0;
+
       for (const id of orderedIDs) {
         const group = df.filter(d => d.BoreholeID === id).sort((a,b) => a.TopDepth_m - b.TopDepth_m);
         if (!group.length) continue;
         const x = chainages.get(id);
-        const z0 = group[0].Z;
 
-        // خط تراز دهانه
+        // خط تراز دهانه (y=0)
         traces.push({
           x: [x - width/2, x + width/2],
-          y: [z0, z0],
+          y: [0, 0],
           mode: 'lines',
           line: { color: 'black' },
           hoverinfo: 'skip',
           showlegend: false
         });
 
-        // لایه‌ها
+        // لایه‌ها با y منفی
         for (const row of group) {
+          const yTop = -row.TopDepth_m;
+          const yBot = -row.BottomDepth_m;
+          if (yBot < minNegDepth) minNegDepth = yBot;
+
           const color = pickColor(row.USCS);
           const xx = [x - width/2, x + width/2, x + width/2, x - width/2, x - width/2];
-          const yy = [row.TopZ, row.TopZ, row.BotZ, row.BotZ, row.TopZ];
+          const yy = [yTop, yTop, yBot, yBot, yTop];
+
           traces.push({
             x: xx, y: yy, mode: 'lines', fill: 'toself',
             line: { color: 'rgba(0,0,0,0.25)' },
@@ -367,18 +372,29 @@
             hovertemplate:
               `گمانه: ${row.BoreholeID}<br>` +
               `USCS: ${row.USCS}<br>` +
-              `Top depth: ${row.TopDepth_m} m (TopZ=${row.TopZ})<br>` +
-              `Bottom depth: ${row.BottomDepth_m} m (BottomZ=${row.BotZ})<br>` +
+              `Top depth: ${row.TopDepth_m} m (y=${yTop})<br>` +
+              `Bottom depth: ${row.BottomDepth_m} m (y=${yBot})<br>` +
+              `TopZ: ${row.TopZ} / BottomZ: ${row.BotZ}<br>` +
               `شرح: ${row.Description}<extra></extra>`,
             showlegend: false
           });
         }
       }
 
+      // اگر کسی بخواهد «۱ بالا» هم داشته باشد، می‌توان محدوده را [1, minNegDepth] گذاشت.
+      // این‌جا به‌صورت خودکار یک «کوچک بالای صفر» هم اضافه می‌کنیم تا عدد 1 قابل دید باشد.
+      const topTick = 1; // ۱ متر بالای صفر
+      const yRangeTop = Math.max(0, topTick);
       const layout = {
-        title: 'GeoProfile - 2D',
+        title: 'GeoProfile - 2D (عمق منفی رو به پایین)',
         xaxis: { title: mode === 'chainage' ? 'Chainage (m)' : (mode === 'y' ? 'Y' : 'X') },
-        yaxis: { title: 'Z (m relative to map zero)', autorange: 'reversed' },
+        yaxis: {
+          title: 'Depth (m, negative downward)',
+          autorange: false,
+          range: [yRangeTop, minNegDepth], // مثال: [1, -7] → ۱ بالا، ۷- پایین
+          zeroline: true,
+          zerolinewidth: 2
+        },
         template: 'plotly_white',
         margin: { l: 70, r: 20, t: 50, b: 60 }
       };
@@ -386,12 +402,12 @@
       Plotly.newPlot('plot', traces, layout, { responsive: true });
     }
 
-    // --- ساخت منشور mesh3d برای یک لایه ---
+    // ساخت منشور برای ۳D (نمای Z واقعی؛ z معکوس می‌شود تا عمق رو به پایین دیده شود)
     function makePrismMesh(X, Y, w, TopZ, BotZ, color, name, hover) {
       const half = w / 2;
       const x = [
-        X - half, X + half, X + half, X - half,  // top face (z = TopZ)
-        X - half, X + half, X + half, X - half   // bottom face (z = BotZ)
+        X - half, X + half, X + half, X - half,  // top face
+        X - half, X + half, X + half, X - half   // bottom face
       ];
       const y = [
         Y - half, Y - half, Y + half, Y + half,
@@ -401,7 +417,7 @@
         TopZ, TopZ, TopZ, TopZ,
         BotZ, BotZ, BotZ, BotZ
       ];
-      // مثلث‌بندی وجوه مکعب مستطیل
+      // مثلث‌بندی وجوه
       const i = [0,1,2, 0,2,3,  4,5,6, 4,6,7,  0,1,5, 0,5,4,  1,2,6, 1,6,5,  2,3,7, 2,7,6,  3,0,4, 3,4,7];
       const j = [1,2,3, 2,3,0,  5,6,7, 6,7,4,  1,5,4, 5,4,0,  2,6,5, 6,5,1,  3,7,6, 7,6,2,  0,4,7, 4,7,3];
       const k = [2,3,0, 3,0,1,  6,7,4, 7,4,5,  5,4,0, 4,0,1,  6,5,1, 5,1,2,  7,6,2, 6,2,3,  4,7,3, 7,3,0];
@@ -417,12 +433,12 @@
       };
     }
 
-    // --- رسم ۳D ---
+    // رسم ۳بعدی (Z واقعی با محور z معکوس برای نمایش عمق رو به پایین)
     function render3D(holes, df) {
       const width = Math.max(1, Math.min(50, Number(colWidthInput.value) || 10));
       const traces = [];
 
-      // نشانگر محل گمانه و برچسب
+      // محل گمانه‌ها
       for (const h of holes) {
         traces.push({
           type: 'scatter3d',
@@ -460,7 +476,7 @@
       }
 
       const layout = {
-        title: 'GeoProfile - 3D',
+        title: 'GeoProfile - 3D (Z axis, عمق رو به پایین)',
         scene: {
           xaxis: { title: 'X (m)' },
           yaxis: { title: 'Y (m)' },
@@ -475,7 +491,7 @@
       Plotly.newPlot('plot', traces, layout, { responsive: true });
     }
 
-    // --- انتخاب حالت و رسم ---
+    // سوییچ حالت و رسم
     function renderProfile() {
       const { holes, df } = prepareData();
       const mode = modeSel.value;
