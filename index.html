@@ -19,37 +19,56 @@
     .btn { background: #1f77b4; color: #fff; border: none; padding: 10px 14px; border-radius: 6px; cursor: pointer; }
     .btn:disabled { background: #aaa; cursor: not-allowed; }
     .note { color: #555; font-size: 0.9em; }
+    .inline { display: inline-flex; align-items: center; gap: 8px; }
+    select, input[type="number"] { padding: 6px; }
   </style>
 </head>
 <body>
   <h1>GeoProfile Visualizer</h1>
-  <p class="note">فایل‌های CSV یا Excel شامل موقعیت گمانه‌ها و لایه‌ها را آپلود کنید تا مقطع طولی رسم شود.</p>
+  <p class="note">
+    مبنای عمودی Z است: تراز دهانهٔ گمانه نسبت به صفر نقشه (مثبت بالاتر، منفی پایین‌تر). عمق لایه‌ها از دهانه به پایین کم می‌شود: TopZ = Z − TopDepth_m.
+  </p>
 
   <div class="row">
     <div class="col panel">
-      <label>فایل گمانه‌ها (Boreholes: BoreholeID, X, Y, Elevation[, GroundLevel])</label>
+      <label>فایل گمانه‌ها (Boreholes: BoreholeID, X, Y, Z)</label>
       <input id="holesFile" type="file" accept=".csv,.xlsx,.xls" />
       <label>فایل لایه‌ها (Layers: BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description])</label>
       <input id="layersFile" type="file" accept=".csv,.xlsx,.xls" />
-      <label>حالت چیدمان افقی</label>
-      <select id="layoutMode">
-        <option value="x">بر اساس X</option>
-        <option value="y">بر اساس Y</option>
-        <option value="chainage">Chainage از X/Y نرمال‌شده</option>
-      </select>
+
+      <div class="inline" style="margin-top:8px;">
+        <label style="margin:0;">حالت رسم:</label>
+        <select id="modeSel">
+          <option value="2d">پروفیل ۲بعدی</option>
+          <option value="3d">پروفیل ۳بعدی</option>
+        </select>
+        <label style="margin:0;">چیدمان افقی ۲D:</label>
+        <select id="layoutMode">
+          <option value="x">بر اساس X</option>
+          <option value="y">بر اساس Y</option>
+          <option value="chainage">Chainage تجمعی</option>
+        </select>
+        <label style="margin:0;">عرض ستون:</label>
+        <input id="colWidth" type="number" min="1" max="100" step="1" value="10"/>
+      </div>
+
       <div style="margin-top:12px;">
         <button id="renderBtn" class="btn" disabled>رسم پروفیل</button>
         <button id="downloadBtn" class="btn" disabled>دانلود PNG</button>
       </div>
       <p class="note" id="status"></p>
     </div>
+
     <div class="col panel">
       <label>راهنما:</label>
       <ul>
-        <li><b>قالب گمانه‌ها:</b> BoreholeID, X, Y, Elevation[, GroundLevel]</li>
-        <li><b>قالب لایه‌ها:</b> BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description]</li>
-        <li><b>محور عمودی:</b> Elevation با نمایش معکوس برای عمق.</li>
-        <li><b>ترکیب USCS:</b> مثل SM-SC به رنگ کد غالب نگاشت می‌شود.</li>
+        <li><b>ستون‌های گمانه‌ها:</b> BoreholeID, X, Y, Z (Z نسبت به تراز صفر نقشه)</li>
+        <li><b>ستون‌های لایه‌ها:</b> BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description]</li>
+        <li><b>محاسبهٔ ارتفاع لایه:</b>
+          TopZ = Z − TopDepth_m، BottomZ = Z − BottomDepth_m
+        </li>
+        <li><b>۲D:</b> محور عمودی Z با نمایش معکوس برای دیدن عمق رو به پایین.</li>
+        <li><b>۳D:</b> منشور هر لایه در مختصات (X,Y) با قاعدهٔ کوچک و ارتفاع بین TopZ و BottomZ.</li>
       </ul>
     </div>
   </div>
@@ -76,6 +95,8 @@
     const downloadBtn = document.getElementById('downloadBtn');
     const statusEl = document.getElementById('status');
     const layoutModeSel = document.getElementById('layoutMode');
+    const modeSel = document.getElementById('modeSel');
+    const colWidthInput = document.getElementById('colWidth');
 
     function pickColor(code) {
       if (!code) return "#CCCCCC";
@@ -120,7 +141,6 @@
     }
 
     function normalizeKeys(row) {
-      // Trim spaces and match common variants
       const norm = {};
       for (const k of Object.keys(row)) {
         const nk = k.trim();
@@ -140,6 +160,7 @@
     }
 
     function toNumber(val) {
+      if (val === null || val === undefined) return null;
       const num = Number(String(val).replace(',', '.'));
       return isFinite(num) ? num : null;
     }
@@ -187,16 +208,16 @@
       }
     });
 
-    function renderProfile() {
+    function prepareData() {
       const holes = state.holes.map(h => ({
         BoreholeID: String(h.BoreholeID ?? h.boreholeid ?? h.ID ?? h.id).trim(),
         X: toNumber(h.X ?? h.x),
         Y: toNumber(h.Y ?? h.y),
-        Elevation: toNumber(h.Elevation ?? h.elevation),
-        GroundLevel: toNumber(h.GroundLevel ?? h.groundlevel ?? h.GL ?? h.gl)
-      })).filter(h => h.BoreholeID && h.X != null && h.Y != null && h.Elevation != null);
+        // Prioritize Z; fallbacks to GroundLevel or Elevation if user hasn't migrated yet
+        Z: toNumber(h.Z ?? h.z ?? h.GroundLevel ?? h.groundlevel ?? h.Elevation ?? h.elevation)
+      })).filter(h => h.BoreholeID && h.X != null && h.Y != null && h.Z != null);
 
-      if (!holes.length) throw new Error('ستون‌های لازم در فایل گمانه‌ها یافت نشد.');
+      if (!holes.length) throw new Error('ستون‌های لازم در فایل گمانه‌ها یافت نشد. لطفاً BoreholeID, X, Y, Z را فراهم کنید.');
 
       const holeIndex = indexBy(holes, 'BoreholeID');
 
@@ -212,27 +233,23 @@
       for (const lay of layers) {
         const hole = (holeIndex.get(lay.BoreholeID) || [])[0];
         if (!hole) continue;
-        const GL = hole.GroundLevel != null ? hole.GroundLevel : hole.Elevation;
+        const Z = hole.Z;
         df.push({
           BoreholeID: lay.BoreholeID,
-          X: hole.X, Y: hole.Y,
-          Elevation: hole.Elevation, GL,
+          X: hole.X, Y: hole.Y, Z,
           TopDepth_m: lay.TopDepth_m, BottomDepth_m: lay.BottomDepth_m,
           USCS: lay.USCS, Description: lay.Description,
-          TopElev: GL - lay.TopDepth_m,
-          BotElev: GL - lay.BottomDepth_m
+          TopZ: Z - lay.TopDepth_m,
+          BotZ: Z - lay.BottomDepth_m
         });
       }
 
       if (!df.length) throw new Error('هیچ لایهٔ همسان با گمانه‌ها یافت نشد.');
+      return { holes, df };
+    }
 
+    function render2D(holes, df) {
       const mode = layoutModeSel.value; // x, y, chainage
-      const xs = df.map(d => d.X);
-      const ys = df.map(d => d.Y);
-      const minX = Math.min(...xs);
-      const minY = Math.min(...ys);
-
-      const chainages = new Map(); // BoreholeID -> position
       const sortedIDs = Array.from(new Set(df.map(d => d.BoreholeID))).sort((a,b) => {
         const ha = holes.find(h => h.BoreholeID === a);
         const hb = holes.find(h => h.BoreholeID === b);
@@ -240,39 +257,36 @@
         return ha.X - hb.X;
       });
 
+      const chainages = new Map();
       let accum = 0;
       let prevCoord = null;
+      const minX = Math.min(...holes.map(h => h.X));
+      const minY = Math.min(...holes.map(h => h.Y));
+
       for (const id of sortedIDs) {
         const h = holes.find(hh => hh.BoreholeID === id);
         let pos;
         if (mode === 'x') pos = h.X - minX;
         else if (mode === 'y') pos = h.Y - minY;
         else {
-          // simple chainage by cumulative distance in chosen sort
           if (!prevCoord) { pos = 0; prevCoord = { x: h.X, y: h.Y }; }
-          else {
-            const dx = h.X - prevCoord.x, dy = h.Y - prevCoord.y;
-            accum += Math.hypot(dx, dy);
-            pos = accum;
-            prevCoord = { x: h.X, y: h.Y };
-          }
+          else { const dx = h.X - prevCoord.x, dy = h.Y - prevCoord.y; accum += Math.hypot(dx, dy); pos = accum; prevCoord = { x: h.X, y: h.Y }; }
         }
         chainages.set(id, pos);
       }
 
       const traces = [];
-      const width = Math.max(5, Math.min(20, Math.floor(800 / sortedIDs.length)));
+      const width = Math.max(5, Math.min(50, Number(colWidthInput.value) || 10));
 
       for (const id of sortedIDs) {
         const group = df.filter(d => d.BoreholeID === id).sort((a,b) => a.TopDepth_m - b.TopDepth_m);
         if (!group.length) continue;
         const x = chainages.get(id);
-        const gl = group[0].GL;
+        const z0 = group[0].Z;
 
-        // ground line
         traces.push({
           x: [x - width/2, x + width/2],
-          y: [gl, gl],
+          y: [z0, z0],
           mode: 'lines',
           line: { color: 'black' },
           hoverinfo: 'skip',
@@ -282,7 +296,7 @@
         for (const row of group) {
           const color = pickColor(row.USCS);
           const xx = [x - width/2, x + width/2, x + width/2, x - width/2, x - width/2];
-          const yy = [row.TopElev, row.TopElev, row.BotElev, row.BotElev, row.TopElev];
+          const yy = [row.TopZ, row.TopZ, row.BotZ, row.BotZ, row.TopZ];
           traces.push({
             x: xx, y: yy, mode: 'lines', fill: 'toself',
             line: { color: 'rgba(0,0,0,0.2)' },
@@ -291,8 +305,8 @@
             hovertemplate:
               `Borehole: ${row.BoreholeID}<br>` +
               `USCS: ${row.USCS}<br>` +
-              `Top: ${row.TopDepth_m} m<br>` +
-              `Bottom: ${row.BottomDepth_m} m<br>` +
+              `Top depth: ${row.TopDepth_m} m (TopZ=${row.TopZ})<br>` +
+              `Bottom depth: ${row.BottomDepth_m} m (BottomZ=${row.BotZ})<br>` +
               `Desc: ${row.Description}`,
             showlegend: false
           });
@@ -300,14 +314,129 @@
       }
 
       const layout = {
-        title: 'GeoProfile Visualizer - Longitudinal Section',
+        title: 'GeoProfile Visualizer - 2D Profile (Z axis)',
         xaxis: { title: mode === 'chainage' ? 'Chainage (m)' : (mode === 'y' ? 'Y' : 'X') },
-        yaxis: { title: 'Elevation (m)', autorange: 'reversed' },
+        yaxis: { title: 'Z (m relative to map zero)', autorange: 'reversed' },
         template: 'plotly_white',
-        margin: { l: 60, r: 20, t: 50, b: 60 }
+        margin: { l: 70, r: 20, t: 50, b: 60 }
       };
 
       Plotly.newPlot('plot', traces, layout, { responsive: true });
+    }
+
+    // Build a rectangular prism mesh for a layer at (X,Y), with footprint width w and heights TopZ..BotZ
+    function makePrismMesh(X, Y, w, TopZ, BotZ, color, name, hover) {
+      const half = w / 2;
+      const x = [
+        X - half, X + half, X + half, X - half,  // top face
+        X - half, X + half, X + half, X - half   // bottom face
+      ];
+      const y = [
+        Y - half, Y - half, Y + half, Y + half,
+        Y - half, Y - half, Y + half, Y + half
+      ];
+      const z = [
+        TopZ, TopZ, TopZ, TopZ,
+        BotZ, BotZ, BotZ, BotZ
+      ];
+      // faces (triangles) indices
+      const i = [
+        0, 1, 2, 0, 2, 3,      // top face
+        4, 5, 6, 4, 6, 7,      // bottom face
+        0, 1, 5, 0, 5, 4,      // side 1
+        1, 2, 6, 1, 6, 5,      // side 2
+        2, 3, 7, 2, 7, 6,      // side 3
+        3, 0, 4, 3, 4, 7       // side 4
+      ];
+      const j = [
+        1, 2, 3, 2, 3, 0,
+        5, 6, 7, 6, 7, 4,
+        1, 5, 4, 5, 4, 0,
+        2, 6, 5, 6, 5, 1,
+        3, 7, 6, 7, 6, 2,
+        0, 4, 7, 4, 7, 3
+      ];
+      const k = [
+        2, 3, 0, 3, 0, 1,
+        6, 7, 4, 7, 4, 5,
+        5, 4, 0, 4, 0, 1,
+        6, 5, 1, 5, 1, 2,
+        7, 6, 2, 6, 2, 3,
+        4, 7, 3, 7, 3, 0
+      ];
+      return {
+        type: 'mesh3d',
+        x, y, z, i, j, k,
+        name,
+        hovertemplate: hover,
+        showscale: false,
+        opacity: 0.95,
+        color: color
+      };
+    }
+
+    function render3D(holes, df) {
+      const width = Math.max(1, Math.min(50, Number(colWidthInput.value) || 10));
+      const traces = [];
+
+      // Ground level markers (optional small vertical line at Z)
+      for (const h of holes) {
+        traces.push({
+          type: 'scatter3d',
+          x: [h.X, h.X],
+          y: [h.Y, h.Y],
+          z: [h.Z, h.Z],
+          mode: 'markers+text',
+          marker: { size: 3, color: 'black' },
+          text: [h.BoreholeID],
+          textposition: 'top center',
+          name: 'Borehole',
+          showlegend: false,
+          hovertemplate: `Borehole: ${h.BoreholeID}<br>X:${h.X} Y:${h.Y} Z:${h.Z}<extra></extra>`
+        });
+      }
+
+      // Layer prisms
+      const byBH = Array.from(new Set(df.map(d => d.BoreholeID)));
+      for (const id of byBH) {
+        const group = df.filter(d => d.BoreholeID === id).sort((a,b) => a.TopDepth_m - b.TopDepth_m);
+        if (!group.length) continue;
+        const X = group[0].X, Y = group[0].Y;
+        for (const row of group) {
+          const color = pickColor(row.USCS);
+          const hover =
+            `Borehole: ${row.BoreholeID}<br>` +
+            `USCS: ${row.USCS}<br>` +
+            `TopZ: ${row.TopZ} m<br>` +
+            `BottomZ: ${row.BotZ} m<br>` +
+            `Top depth: ${row.TopDepth_m} m<br>` +
+            `Bottom depth: ${row.BottomDepth_m} m<br>` +
+            `Desc: ${row.Description}<extra></extra>`;
+          traces.push(makePrismMesh(X, Y, width, row.TopZ, row.BotZ, color, row.USCS, hover));
+        }
+      }
+
+      const layout = {
+        title: 'GeoProfile Visualizer - 3D Profile (X-Y-Z)',
+        scene: {
+          xaxis: { title: 'X (m)' },
+          yaxis: { title: 'Y (m)' },
+          zaxis: { title: 'Z (m relative to map zero)', autorange: 'reversed' },
+          aspectmode: 'data',
+          camera: { eye: { x: 1.6, y: 1.6, z: 0.8 } }
+        },
+        margin: { l: 0, r: 0, t: 50, b: 0 },
+        template: 'plotly_white'
+      };
+
+      Plotly.newPlot('plot', traces, layout, { responsive: true });
+    }
+
+    function renderProfile() {
+      const { holes, df } = prepareData();
+      const mode = modeSel.value;
+      if (mode === '2d') render2D(holes, df);
+      else render3D(holes, df);
     }
   </script>
 </body>
