@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>GeoProfile Visualizer</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net"/>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    .panel { border: 1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 16px; }
+    label { display: block; margin-bottom: 8px; font-weight: 600; }
+    input[type="file"] { margin-bottom: 12px; }
+    #plot { width: 100%; height: 70vh; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .col { flex: 1 1 320px; }
+    .btn { background: #1f77b4; color: #fff; border: none; padding: 10px 14px; border-radius: 6px; cursor: pointer; }
+    .btn:disabled { background: #aaa; cursor: not-allowed; }
+    .note { color: #555; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>GeoProfile Visualizer</h1>
+  <p class="note">فایل‌های CSV یا Excel شامل موقعیت گمانه‌ها و لایه‌ها را آپلود کنید تا مقطع طولی رسم شود.</p>
+
+  <div class="row">
+    <div class="col panel">
+      <label>فایل گمانه‌ها (Boreholes: BoreholeID, X, Y, Elevation[, GroundLevel])</label>
+      <input id="holesFile" type="file" accept=".csv,.xlsx,.xls" />
+      <label>فایل لایه‌ها (Layers: BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description])</label>
+      <input id="layersFile" type="file" accept=".csv,.xlsx,.xls" />
+      <label>حالت چیدمان افقی</label>
+      <select id="layoutMode">
+        <option value="x">بر اساس X</option>
+        <option value="y">بر اساس Y</option>
+        <option value="chainage">Chainage از X/Y نرمال‌شده</option>
+      </select>
+      <div style="margin-top:12px;">
+        <button id="renderBtn" class="btn" disabled>رسم پروفیل</button>
+        <button id="downloadBtn" class="btn" disabled>دانلود PNG</button>
+      </div>
+      <p class="note" id="status"></p>
+    </div>
+    <div class="col panel">
+      <label>راهنما:</label>
+      <ul>
+        <li><b>قالب گمانه‌ها:</b> BoreholeID, X, Y, Elevation[, GroundLevel]</li>
+        <li><b>قالب لایه‌ها:</b> BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description]</li>
+        <li><b>محور عمودی:</b> Elevation با نمایش معکوس برای عمق.</li>
+        <li><b>ترکیب USCS:</b> مثل SM-SC به رنگ کد غالب نگاشت می‌شود.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div id="plot" class="panel"></div>
+
+  <script>
+    const USCS_COLORS = {
+      "GW": "#8B5A2B", "GP": "#8B5A2B",
+      "SW": "#F4A460", "SP": "#F4A460",
+      "SM": "#E0B07B", "SC": "#D28F6D",
+      "GM": "#A0734A", "GC": "#8A6A48",
+      "ML": "#B5C7E6", "CL": "#7FB3D5",
+      "OL": "#A3C1B0", "MH": "#4A76A8",
+      "CH": "#2E86C1", "OH": "#5C8D89",
+      "PT": "#3B4A3F", "FILL": "#AAAAAA"
+    };
+
+    const state = { holes: null, layers: null };
+
+    const holesInput = document.getElementById('holesFile');
+    const layersInput = document.getElementById('layersFile');
+    const renderBtn = document.getElementById('renderBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const statusEl = document.getElementById('status');
+    const layoutModeSel = document.getElementById('layoutMode');
+
+    function pickColor(code) {
+      if (!code) return "#CCCCCC";
+      const norm = String(code).toUpperCase().replace("/", "-").split("-");
+      for (const part of norm) {
+        if (USCS_COLORS[part]) return USCS_COLORS[part];
+      }
+      return "#CCCCCC";
+    }
+
+    function parseCSV(file) {
+      return new Promise((resolve, reject) => {
+        Papa.parse(file, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (res) => resolve(res.data),
+          error: (err) => reject(err)
+        });
+      });
+    }
+
+    function parseXLSX(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const wb = XLSX.read(e.target.result, { type: 'array' });
+          const sheetName = wb.SheetNames[0];
+          const sheet = wb.Sheets[sheetName];
+          const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+          resolve(json);
+        };
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    async function parseFile(file) {
+      const name = file.name.toLowerCase();
+      if (name.endsWith('.csv')) return parseCSV(file);
+      if (name.endsWith('.xlsx') || name.endsWith('.xls')) return parseXLSX(file);
+      throw new Error('فرمت فایل پشتیبانی نمی‌شود');
+    }
+
+    function normalizeKeys(row) {
+      // Trim spaces and match common variants
+      const norm = {};
+      for (const k of Object.keys(row)) {
+        const nk = k.trim();
+        norm[nk] = row[k];
+      }
+      return norm;
+    }
+
+    function indexBy(arr, key) {
+      const map = new Map();
+      for (const r of arr) {
+        const id = String(r[key]).trim();
+        if (!map.has(id)) map.set(id, []);
+        map.get(id).push(r);
+      }
+      return map;
+    }
+
+    function toNumber(val) {
+      const num = Number(String(val).replace(',', '.'));
+      return isFinite(num) ? num : null;
+    }
+
+    holesInput.addEventListener('change', async (e) => {
+      statusEl.textContent = 'در حال خواندن فایل گمانه‌ها...';
+      try {
+        const data = await parseFile(e.target.files[0]);
+        state.holes = data.map(normalizeKeys);
+        statusEl.textContent = `گمانه‌ها: ${state.holes.length} رکورد`;
+      } catch (err) {
+        statusEl.textContent = 'خطا در خواندن گمانه‌ها: ' + err.message;
+      }
+      renderBtn.disabled = !(state.holes && state.layers);
+    });
+
+    layersInput.addEventListener('change', async (e) => {
+      statusEl.textContent = 'در حال خواندن فایل لایه‌ها...';
+      try {
+        const data = await parseFile(e.target.files[0]);
+        state.layers = data.map(normalizeKeys);
+        statusEl.textContent = `لایه‌ها: ${state.layers.length} رکورد`;
+      } catch (err) {
+        statusEl.textContent = 'خطا در خواندن لایه‌ها: ' + err.message;
+      }
+      renderBtn.disabled = !(state.holes && state.layers);
+    });
+
+    renderBtn.addEventListener('click', () => {
+      try {
+        renderProfile();
+        downloadBtn.disabled = false;
+        statusEl.textContent = 'رسم انجام شد.';
+      } catch (err) {
+        statusEl.textContent = 'خطا در رسم: ' + err.message;
+      }
+    });
+
+    downloadBtn.addEventListener('click', async () => {
+      const gd = document.getElementById('plot');
+      try {
+        await Plotly.downloadImage(gd, { format: 'png', filename: 'geoprofile', width: 1600, height: 900 });
+      } catch (err) {
+        statusEl.textContent = 'خطا در دانلود تصویر';
+      }
+    });
+
+    function renderProfile() {
+      const holes = state.holes.map(h => ({
+        BoreholeID: String(h.BoreholeID ?? h.boreholeid ?? h.ID ?? h.id).trim(),
+        X: toNumber(h.X ?? h.x),
+        Y: toNumber(h.Y ?? h.y),
+        Elevation: toNumber(h.Elevation ?? h.elevation),
+        GroundLevel: toNumber(h.GroundLevel ?? h.groundlevel ?? h.GL ?? h.gl)
+      })).filter(h => h.BoreholeID && h.X != null && h.Y != null && h.Elevation != null);
+
+      if (!holes.length) throw new Error('ستون‌های لازم در فایل گمانه‌ها یافت نشد.');
+
+      const holeIndex = indexBy(holes, 'BoreholeID');
+
+      const layers = state.layers.map(r => ({
+        BoreholeID: String(r.BoreholeID ?? r.boreholeid ?? r.ID ?? r.id).trim(),
+        TopDepth_m: toNumber(r.TopDepth_m ?? r.topdepth_m ?? r.TopDepth ?? r.top),
+        BottomDepth_m: toNumber(r.BottomDepth_m ?? r.bottomdepth_m ?? r.BottomDepth ?? r.bottom),
+        USCS: String(r.USCS ?? r.uscs ?? '').trim(),
+        Description: String(r.Description ?? r.description ?? '')
+      })).filter(r => r.BoreholeID && r.TopDepth_m != null && r.BottomDepth_m != null);
+
+      const df = [];
+      for (const lay of layers) {
+        const hole = (holeIndex.get(lay.BoreholeID) || [])[0];
+        if (!hole) continue;
+        const GL = hole.GroundLevel != null ? hole.GroundLevel : hole.Elevation;
+        df.push({
+          BoreholeID: lay.BoreholeID,
+          X: hole.X, Y: hole.Y,
+          Elevation: hole.Elevation, GL,
+          TopDepth_m: lay.TopDepth_m, BottomDepth_m: lay.BottomDepth_m,
+          USCS: lay.USCS, Description: lay.Description,
+          TopElev: GL - lay.TopDepth_m,
+          BotElev: GL - lay.BottomDepth_m
+        });
+      }
+
+      if (!df.length) throw new Error('هیچ لایهٔ همسان با گمانه‌ها یافت نشد.');
+
+      const mode = layoutModeSel.value; // x, y, chainage
+      const xs = df.map(d => d.X);
+      const ys = df.map(d => d.Y);
+      const minX = Math.min(...xs);
+      const minY = Math.min(...ys);
+
+      const chainages = new Map(); // BoreholeID -> position
+      const sortedIDs = Array.from(new Set(df.map(d => d.BoreholeID))).sort((a,b) => {
+        const ha = holes.find(h => h.BoreholeID === a);
+        const hb = holes.find(h => h.BoreholeID === b);
+        if (mode === 'y') return ha.Y - hb.Y;
+        return ha.X - hb.X;
+      });
+
+      let accum = 0;
+      let prevCoord = null;
+      for (const id of sortedIDs) {
+        const h = holes.find(hh => hh.BoreholeID === id);
+        let pos;
+        if (mode === 'x') pos = h.X - minX;
+        else if (mode === 'y') pos = h.Y - minY;
+        else {
+          // simple chainage by cumulative distance in chosen sort
+          if (!prevCoord) { pos = 0; prevCoord = { x: h.X, y: h.Y }; }
+          else {
+            const dx = h.X - prevCoord.x, dy = h.Y - prevCoord.y;
+            accum += Math.hypot(dx, dy);
+            pos = accum;
+            prevCoord = { x: h.X, y: h.Y };
+          }
+        }
+        chainages.set(id, pos);
+      }
+
+      const traces = [];
+      const width = Math.max(5, Math.min(20, Math.floor(800 / sortedIDs.length)));
+
+      for (const id of sortedIDs) {
+        const group = df.filter(d => d.BoreholeID === id).sort((a,b) => a.TopDepth_m - b.TopDepth_m);
+        if (!group.length) continue;
+        const x = chainages.get(id);
+        const gl = group[0].GL;
+
+        // ground line
+        traces.push({
+          x: [x - width/2, x + width/2],
+          y: [gl, gl],
+          mode: 'lines',
+          line: { color: 'black' },
+          hoverinfo: 'skip',
+          showlegend: false
+        });
+
+        for (const row of group) {
+          const color = pickColor(row.USCS);
+          const xx = [x - width/2, x + width/2, x + width/2, x - width/2, x - width/2];
+          const yy = [row.TopElev, row.TopElev, row.BotElev, row.BotElev, row.TopElev];
+          traces.push({
+            x: xx, y: yy, mode: 'lines', fill: 'toself',
+            line: { color: 'rgba(0,0,0,0.2)' },
+            fillcolor: color,
+            name: row.USCS,
+            hovertemplate:
+              `Borehole: ${row.BoreholeID}<br>` +
+              `USCS: ${row.USCS}<br>` +
+              `Top: ${row.TopDepth_m} m<br>` +
+              `Bottom: ${row.BottomDepth_m} m<br>` +
+              `Desc: ${row.Description}`,
+            showlegend: false
+          });
+        }
+      }
+
+      const layout = {
+        title: 'GeoProfile Visualizer - Longitudinal Section',
+        xaxis: { title: mode === 'chainage' ? 'Chainage (m)' : (mode === 'y' ? 'Y' : 'X') },
+        yaxis: { title: 'Elevation (m)', autorange: 'reversed' },
+        template: 'plotly_white',
+        margin: { l: 60, r: 20, t: 50, b: 60 }
+      };
+
+      Plotly.newPlot('plot', traces, layout, { responsive: true });
+    }
+  </script>
+</body>
+</html>
