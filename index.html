@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="fa">
+<html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
@@ -9,6 +9,7 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
   <style>
+    :root { color-scheme: light dark; }
     body { font-family: sans-serif; margin: 24px; }
     .panel { border: 1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 16px; }
     label { display: block; margin-bottom: 8px; font-weight: 600; }
@@ -21,19 +22,21 @@
     .note { color: #555; font-size: 0.9em; }
     .inline { display: inline-flex; align-items: center; gap: 8px; }
     select, input[type="number"] { padding: 6px; }
+    code { background: rgba(0,0,0,.05); padding: .1rem .3rem; border-radius: 4px; }
   </style>
 </head>
 <body>
   <h1>GeoProfile Visualizer</h1>
   <p class="note">
-    مبنای عمودی Z است: تراز دهانهٔ گمانه نسبت به صفر نقشه (مثبت بالاتر، منفی پایین‌تر). عمق لایه‌ها از دهانه به پایین کم می‌شود: TopZ = Z − TopDepth_m.
+    مبنای عمودی <b>Z</b> است: تراز دهانهٔ گمانه نسبت به صفر نقشه (مثبت بالاتر، منفی پایین‌تر). محاسبهٔ ارتفاع لایه‌ها:
+    <code>TopZ = Z − TopDepth_m</code> و <code>BottomZ = Z − BottomDepth_m</code>.
   </p>
 
   <div class="row">
     <div class="col panel">
-      <label>فایل گمانه‌ها (Boreholes: BoreholeID, X, Y, Z)</label>
+      <label>فایل گمانه‌ها (ستون‌ها: <code>BoreholeID, X, Y, Z</code>)</label>
       <input id="holesFile" type="file" accept=".csv,.xlsx,.xls" />
-      <label>فایل لایه‌ها (Layers: BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description])</label>
+      <label>فایل لایه‌ها (ستون‌ها: <code>BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description]</code>)</label>
       <input id="layersFile" type="file" accept=".csv,.xlsx,.xls" />
 
       <div class="inline" style="margin-top:8px;">
@@ -64,11 +67,9 @@
       <ul>
         <li><b>ستون‌های گمانه‌ها:</b> BoreholeID, X, Y, Z (Z نسبت به تراز صفر نقشه)</li>
         <li><b>ستون‌های لایه‌ها:</b> BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description]</li>
-        <li><b>محاسبهٔ ارتفاع لایه:</b>
-          TopZ = Z − TopDepth_m، BottomZ = Z − BottomDepth_m
-        </li>
+        <li><b>محاسبهٔ ارتفاع لایه:</b> TopZ = Z − TopDepth_m، BottomZ = Z − BottomDepth_m</li>
         <li><b>۲D:</b> محور عمودی Z با نمایش معکوس برای دیدن عمق رو به پایین.</li>
-        <li><b>۳D:</b> منشور هر لایه در مختصات (X,Y) با قاعدهٔ کوچک و ارتفاع بین TopZ و BottomZ.</li>
+        <li><b>۳D:</b> منشور هر لایه در مختصات (X,Y) با ارتفاع بین TopZ و BottomZ.</li>
       </ul>
     </div>
   </div>
@@ -76,6 +77,7 @@
   <div id="plot" class="panel"></div>
 
   <script>
+    // رنگ‌های استاندارد برای کدهای USCS (اولین جزءِ کد، مبنا قرار می‌گیرد)
     const USCS_COLORS = {
       "GW": "#8B5A2B", "GP": "#8B5A2B",
       "SW": "#F4A460", "SP": "#F4A460",
@@ -98,6 +100,7 @@
     const modeSel = document.getElementById('modeSel');
     const colWidthInput = document.getElementById('colWidth');
 
+    // --- ابزارک‌های عمومی ---
     function pickColor(code) {
       if (!code) return "#CCCCCC";
       const norm = String(code).toUpperCase().replace("/", "-").split("-");
@@ -134,16 +137,16 @@
     }
 
     async function parseFile(file) {
-      const name = file.name.toLowerCase();
+      const name = (file?.name || "").toLowerCase();
       if (name.endsWith('.csv')) return parseCSV(file);
       if (name.endsWith('.xlsx') || name.endsWith('.xls')) return parseXLSX(file);
-      throw new Error('فرمت فایل پشتیبانی نمی‌شود');
+      throw new Error('فرمت فایل پشتیبانی نمی‌شود (CSV یا XLSX).');
     }
 
     function normalizeKeys(row) {
       const norm = {};
       for (const k of Object.keys(row)) {
-        const nk = k.trim();
+        const nk = String(k).trim();
         norm[nk] = row[k];
       }
       return norm;
@@ -160,15 +163,22 @@
     }
 
     function toNumber(val) {
-      if (val === null || val === undefined) return null;
+      if (val === null || val === undefined || val === "") return null;
       const num = Number(String(val).replace(',', '.'));
-      return isFinite(num) ? num : null;
+      return Number.isFinite(num) ? num : null;
     }
 
+    function dist(a, b) {
+      const dx = a.X - b.X, dy = a.Y - b.Y;
+      return Math.hypot(dx, dy);
+    }
+
+    // --- رویدادها ---
     holesInput.addEventListener('change', async (e) => {
       statusEl.textContent = 'در حال خواندن فایل گمانه‌ها...';
       try {
-        const data = await parseFile(e.target.files[0]);
+        const file = e.target.files?.[0];
+        const data = await parseFile(file);
         state.holes = data.map(normalizeKeys);
         statusEl.textContent = `گمانه‌ها: ${state.holes.length} رکورد`;
       } catch (err) {
@@ -180,7 +190,8 @@
     layersInput.addEventListener('change', async (e) => {
       statusEl.textContent = 'در حال خواندن فایل لایه‌ها...';
       try {
-        const data = await parseFile(e.target.files[0]);
+        const file = e.target.files?.[0];
+        const data = await parseFile(file);
         state.layers = data.map(normalizeKeys);
         statusEl.textContent = `لایه‌ها: ${state.layers.length} رکورد`;
       } catch (err) {
@@ -195,7 +206,7 @@
         downloadBtn.disabled = false;
         statusEl.textContent = 'رسم انجام شد.';
       } catch (err) {
-        statusEl.textContent = 'خطا در رسم: ' + err.message;
+        statusEl.textContent = '❌ ' + err.message;
       }
     });
 
@@ -208,26 +219,33 @@
       }
     });
 
+    // --- آماده‌سازی داده ---
     function prepareData() {
-      const holes = state.holes.map(h => ({
-        BoreholeID: String(h.BoreholeID ?? h.boreholeid ?? h.ID ?? h.id).trim(),
+      const holes = (state.holes || []).map(h => ({
+        BoreholeID: String(h.BoreholeID ?? h.boreholeid ?? h.ID ?? h.id ?? "").trim(),
         X: toNumber(h.X ?? h.x),
         Y: toNumber(h.Y ?? h.y),
-        // Prioritize Z; fallbacks to GroundLevel or Elevation if user hasn't migrated yet
+        // Z نسبت به صفر نقشه؛ درصورت مهاجرت‌نکردن کاربر، GroundLevel/Elevation هم پشتیبانی می‌شود
         Z: toNumber(h.Z ?? h.z ?? h.GroundLevel ?? h.groundlevel ?? h.Elevation ?? h.elevation)
       })).filter(h => h.BoreholeID && h.X != null && h.Y != null && h.Z != null);
 
-      if (!holes.length) throw new Error('ستون‌های لازم در فایل گمانه‌ها یافت نشد. لطفاً BoreholeID, X, Y, Z را فراهم کنید.');
+      if (!holes.length) {
+        throw new Error('ستون‌های لازم در فایل گمانه‌ها یافت نشد. مطمئن شوید ستون‌های BoreholeID, X, Y, Z وجود دارند و مقادیر معتبر دارند.');
+      }
 
       const holeIndex = indexBy(holes, 'BoreholeID');
 
-      const layers = state.layers.map(r => ({
-        BoreholeID: String(r.BoreholeID ?? r.boreholeid ?? r.ID ?? r.id).trim(),
+      const layers = (state.layers || []).map(r => ({
+        BoreholeID: String(r.BoreholeID ?? r.boreholeid ?? r.ID ?? r.id ?? "").trim(),
         TopDepth_m: toNumber(r.TopDepth_m ?? r.topdepth_m ?? r.TopDepth ?? r.top),
         BottomDepth_m: toNumber(r.BottomDepth_m ?? r.bottomdepth_m ?? r.BottomDepth ?? r.bottom),
         USCS: String(r.USCS ?? r.uscs ?? '').trim(),
         Description: String(r.Description ?? r.description ?? '')
       })).filter(r => r.BoreholeID && r.TopDepth_m != null && r.BottomDepth_m != null);
+
+      if (!layers.length) {
+        throw new Error('ستون‌های لازم در فایل لایه‌ها یافت نشد. مطمئن شوید ستون‌های BoreholeID, TopDepth_m, BottomDepth_m وجود دارند.');
+      }
 
       const df = [];
       for (const lay of layers) {
@@ -244,33 +262,75 @@
         });
       }
 
-      if (!df.length) throw new Error('هیچ لایهٔ همسان با گمانه‌ها یافت نشد.');
+      if (!df.length) throw new Error('هیچ لایه‌ای با گمانه‌های معرفی‌شده تطابق پیدا نکرد.');
+
       return { holes, df };
     }
 
+    // --- چیدمان chainage با نزدیک‌ترین همسایه ---
+    function orderByNearestNeighbor(holes) {
+      if (holes.length <= 2) return holes.map(h => h.BoreholeID);
+      // شروع از چپ‌ترین (کمینه X؛ در تساوی، کمینه Y)
+      let startIdx = 0;
+      for (let i = 1; i < holes.length; i++) {
+        if (holes[i].X < holes[startIdx].X || (holes[i].X === holes[startIdx].X && holes[i].Y < holes[startIdx].Y)) {
+          startIdx = i;
+        }
+      }
+      const visited = new Set();
+      const order = [];
+      let current = holes[startIdx];
+      visited.add(current.BoreholeID);
+      order.push(current.BoreholeID);
+
+      for (let step = 1; step < holes.length; step++) {
+        let best = null, bestD = Infinity;
+        for (const h of holes) {
+          if (visited.has(h.BoreholeID)) continue;
+          const d = dist(current, h);
+          if (d < bestD) { bestD = d; best = h; }
+        }
+        if (!best) break;
+        visited.add(best.BoreholeID);
+        order.push(best.BoreholeID);
+        current = best;
+      }
+      // اگر چیزی جا ماند (در عمل نباید)، اضافه کن
+      for (const h of holes) if (!visited.has(h.BoreholeID)) order.push(h.BoreholeID);
+      return order;
+    }
+
+    // --- رسم ۲D ---
     function render2D(holes, df) {
       const mode = layoutModeSel.value; // x, y, chainage
-      const sortedIDs = Array.from(new Set(df.map(d => d.BoreholeID))).sort((a,b) => {
-        const ha = holes.find(h => h.BoreholeID === a);
-        const hb = holes.find(h => h.BoreholeID === b);
-        if (mode === 'y') return ha.Y - hb.Y;
-        return ha.X - hb.X;
-      });
 
+      // تعیین ترتیب گمانه‌ها برای محور افقی
+      let orderedIDs;
+      if (mode === 'chainage') {
+        orderedIDs = orderByNearestNeighbor(holes);
+      } else {
+        orderedIDs = holes
+          .slice()
+          .sort((a,b) => mode === 'y' ? (a.Y - b.Y) : (a.X - b.X))
+          .map(h => h.BoreholeID);
+      }
+
+      // محاسبهٔ موقعیت افقی (Xplot)
       const chainages = new Map();
-      let accum = 0;
-      let prevCoord = null;
       const minX = Math.min(...holes.map(h => h.X));
       const minY = Math.min(...holes.map(h => h.Y));
 
-      for (const id of sortedIDs) {
-        const h = holes.find(hh => hh.BoreholeID === id);
+      let accum = 0;
+      let prev = null;
+      for (const id of orderedIDs) {
+        const h = holes.find(v => v.BoreholeID === id);
         let pos;
         if (mode === 'x') pos = h.X - minX;
         else if (mode === 'y') pos = h.Y - minY;
         else {
-          if (!prevCoord) { pos = 0; prevCoord = { x: h.X, y: h.Y }; }
-          else { const dx = h.X - prevCoord.x, dy = h.Y - prevCoord.y; accum += Math.hypot(dx, dy); pos = accum; prevCoord = { x: h.X, y: h.Y }; }
+          if (!prev) { pos = 0; }
+          else { accum += dist(prev, h); pos = accum; }
+          prev = h;
         }
         chainages.set(id, pos);
       }
@@ -278,12 +338,13 @@
       const traces = [];
       const width = Math.max(5, Math.min(50, Number(colWidthInput.value) || 10));
 
-      for (const id of sortedIDs) {
+      for (const id of orderedIDs) {
         const group = df.filter(d => d.BoreholeID === id).sort((a,b) => a.TopDepth_m - b.TopDepth_m);
         if (!group.length) continue;
         const x = chainages.get(id);
         const z0 = group[0].Z;
 
+        // خط تراز دهانه
         traces.push({
           x: [x - width/2, x + width/2],
           y: [z0, z0],
@@ -293,28 +354,29 @@
           showlegend: false
         });
 
+        // لایه‌ها
         for (const row of group) {
           const color = pickColor(row.USCS);
           const xx = [x - width/2, x + width/2, x + width/2, x - width/2, x - width/2];
           const yy = [row.TopZ, row.TopZ, row.BotZ, row.BotZ, row.TopZ];
           traces.push({
             x: xx, y: yy, mode: 'lines', fill: 'toself',
-            line: { color: 'rgba(0,0,0,0.2)' },
+            line: { color: 'rgba(0,0,0,0.25)' },
             fillcolor: color,
             name: row.USCS,
             hovertemplate:
-              `Borehole: ${row.BoreholeID}<br>` +
+              `گمانه: ${row.BoreholeID}<br>` +
               `USCS: ${row.USCS}<br>` +
               `Top depth: ${row.TopDepth_m} m (TopZ=${row.TopZ})<br>` +
               `Bottom depth: ${row.BottomDepth_m} m (BottomZ=${row.BotZ})<br>` +
-              `Desc: ${row.Description}`,
+              `شرح: ${row.Description}<extra></extra>`,
             showlegend: false
           });
         }
       }
 
       const layout = {
-        title: 'GeoProfile Visualizer - 2D Profile (Z axis)',
+        title: 'GeoProfile - 2D',
         xaxis: { title: mode === 'chainage' ? 'Chainage (m)' : (mode === 'y' ? 'Y' : 'X') },
         yaxis: { title: 'Z (m relative to map zero)', autorange: 'reversed' },
         template: 'plotly_white',
@@ -324,12 +386,12 @@
       Plotly.newPlot('plot', traces, layout, { responsive: true });
     }
 
-    // Build a rectangular prism mesh for a layer at (X,Y), with footprint width w and heights TopZ..BotZ
+    // --- ساخت منشور mesh3d برای یک لایه ---
     function makePrismMesh(X, Y, w, TopZ, BotZ, color, name, hover) {
       const half = w / 2;
       const x = [
-        X - half, X + half, X + half, X - half,  // top face
-        X - half, X + half, X + half, X - half   // bottom face
+        X - half, X + half, X + half, X - half,  // top face (z = TopZ)
+        X - half, X + half, X + half, X - half   // bottom face (z = BotZ)
       ];
       const y = [
         Y - half, Y - half, Y + half, Y + half,
@@ -339,53 +401,34 @@
         TopZ, TopZ, TopZ, TopZ,
         BotZ, BotZ, BotZ, BotZ
       ];
-      // faces (triangles) indices
-      const i = [
-        0, 1, 2, 0, 2, 3,      // top face
-        4, 5, 6, 4, 6, 7,      // bottom face
-        0, 1, 5, 0, 5, 4,      // side 1
-        1, 2, 6, 1, 6, 5,      // side 2
-        2, 3, 7, 2, 7, 6,      // side 3
-        3, 0, 4, 3, 4, 7       // side 4
-      ];
-      const j = [
-        1, 2, 3, 2, 3, 0,
-        5, 6, 7, 6, 7, 4,
-        1, 5, 4, 5, 4, 0,
-        2, 6, 5, 6, 5, 1,
-        3, 7, 6, 7, 6, 2,
-        0, 4, 7, 4, 7, 3
-      ];
-      const k = [
-        2, 3, 0, 3, 0, 1,
-        6, 7, 4, 7, 4, 5,
-        5, 4, 0, 4, 0, 1,
-        6, 5, 1, 5, 1, 2,
-        7, 6, 2, 6, 2, 3,
-        4, 7, 3, 7, 3, 0
-      ];
+      // مثلث‌بندی وجوه مکعب مستطیل
+      const i = [0,1,2, 0,2,3,  4,5,6, 4,6,7,  0,1,5, 0,5,4,  1,2,6, 1,6,5,  2,3,7, 2,7,6,  3,0,4, 3,4,7];
+      const j = [1,2,3, 2,3,0,  5,6,7, 6,7,4,  1,5,4, 5,4,0,  2,6,5, 6,5,1,  3,7,6, 7,6,2,  0,4,7, 4,7,3];
+      const k = [2,3,0, 3,0,1,  6,7,4, 7,4,5,  5,4,0, 4,0,1,  6,5,1, 5,1,2,  7,6,2, 6,2,3,  4,7,3, 7,3,0];
+
       return {
         type: 'mesh3d',
         x, y, z, i, j, k,
         name,
         hovertemplate: hover,
         showscale: false,
-        opacity: 0.95,
-        color: color
+        opacity: 0.96,
+        color
       };
     }
 
+    // --- رسم ۳D ---
     function render3D(holes, df) {
       const width = Math.max(1, Math.min(50, Number(colWidthInput.value) || 10));
       const traces = [];
 
-      // Ground level markers (optional small vertical line at Z)
+      // نشانگر محل گمانه و برچسب
       for (const h of holes) {
         traces.push({
           type: 'scatter3d',
-          x: [h.X, h.X],
-          y: [h.Y, h.Y],
-          z: [h.Z, h.Z],
+          x: [h.X],
+          y: [h.Y],
+          z: [h.Z],
           mode: 'markers+text',
           marker: { size: 3, color: 'black' },
           text: [h.BoreholeID],
@@ -396,7 +439,7 @@
         });
       }
 
-      // Layer prisms
+      // منشور لایه‌ها
       const byBH = Array.from(new Set(df.map(d => d.BoreholeID)));
       for (const id of byBH) {
         const group = df.filter(d => d.BoreholeID === id).sort((a,b) => a.TopDepth_m - b.TopDepth_m);
@@ -417,13 +460,13 @@
       }
 
       const layout = {
-        title: 'GeoProfile Visualizer - 3D Profile (X-Y-Z)',
+        title: 'GeoProfile - 3D',
         scene: {
           xaxis: { title: 'X (m)' },
           yaxis: { title: 'Y (m)' },
           zaxis: { title: 'Z (m relative to map zero)', autorange: 'reversed' },
           aspectmode: 'data',
-          camera: { eye: { x: 1.6, y: 1.6, z: 0.8 } }
+          camera: { eye: { x: 1.6, y: 1.6, z: 0.9 } }
         },
         margin: { l: 0, r: 0, t: 50, b: 0 },
         template: 'plotly_white'
@@ -432,6 +475,7 @@
       Plotly.newPlot('plot', traces, layout, { responsive: true });
     }
 
+    // --- انتخاب حالت و رسم ---
     function renderProfile() {
       const { holes, df } = prepareData();
       const mode = modeSel.value;
