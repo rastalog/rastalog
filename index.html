@@ -23,14 +23,14 @@
     .inline { display: inline-flex; align-items: center; gap: 8px; }
     select, input[type="number"] { padding: 6px; }
     code { background: rgba(0,0,0,.05); padding: .1rem .3rem; border-radius: 4px; }
+    .chk { margin-inline-start: 8px; }
   </style>
 </head>
 <body>
   <h1>GeoProfile Visualizer</h1>
   <p class="note">
-    مبنای عمودی <b>Z</b> (تراز نسبت به صفر نقشه) است. برای نمایش ۲بعدی، محور عمق به‌صورت «منفی رو به پایین» رسم می‌شود:
-    <code>y = −depth</code>، پس دهانهٔ گمانه در <code>y=0</code> است. هم‌چنین
-    <code>TopZ = Z − TopDepth_m</code> و <code>BottomZ = Z − BottomDepth_m</code>.
+    ۲بعدی بر اساس عمق منفی رو به پایین رسم می‌شود: <code>y = −depth</code> (دهانهٔ گمانه: <code>y=0</code>).
+    ۳بعدی فقط زیرزمین را نشان می‌دهد (هر لایه تا <code>z=0</code> کات می‌شود) و یک «قاچ» نمایشی برای دیدن داخل دارد.
   </p>
 
   <div class="row">
@@ -56,6 +56,11 @@
         <input id="colWidth" type="number" min="1" max="100" step="1" value="10"/>
       </div>
 
+      <div class="inline" style="margin-top:8px;">
+        <input id="cutaway" class="chk" type="checkbox" checked />
+        <label for="cutaway" style="margin:0;">برش نمایشی در ۳بعدی (باز شدن سمت +Y)</label>
+      </div>
+
       <div style="margin-top:12px;">
         <button id="renderBtn" class="btn" disabled>رسم پروفیل</button>
         <button id="downloadBtn" class="btn" disabled>دانلود PNG</button>
@@ -66,11 +71,9 @@
     <div class="col panel">
       <label>راهنما:</label>
       <ul>
-        <li><b>ستون‌های گمانه‌ها:</b> BoreholeID, X, Y, Z (Z نسبت به تراز صفر نقشه)</li>
-        <li><b>ستون‌های لایه‌ها:</b> BoreholeID, TopDepth_m, BottomDepth_m, USCS[, Description]</li>
-        <li><b>محاسبهٔ ارتفاع لایه:</b> TopZ = Z − TopDepth_m، BottomZ = Z − BottomDepth_m</li>
-        <li><b>۲D:</b> عمق با علامت منفی رو به پایین (دهانه: y=0، عمق ۷ متر: y=−7)</li>
-        <li><b>۳D:</b> منشور هر لایه در مختصات (X,Y) با ارتفاع بین TopZ و BottomZ.</li>
+        <li><b>محاسبات ارتفاع:</b> <code>TopZ = Z − TopDepth_m</code> ، <code>BottomZ = Z − BottomDepth_m</code></li>
+        <li><b>۲D:</b> عمق منفی رو به پایین (مثلاً عمق ۷ متر ⇒ <code>y=−7</code>)، خط زمین <code>y=0</code>.</li>
+        <li><b>۳D:</b> لایه‌ها فقط برای بخش زیر <code>z=0</code> نمایش داده می‌شوند + صفحهٔ زمین (نیمه‌شفاف) و برش دید.</li>
       </ul>
     </div>
   </div>
@@ -78,7 +81,7 @@
   <div id="plot" class="panel"></div>
 
   <script>
-    // رنگ‌های استاندارد برای کدهای USCS
+    // رنگ‌ها برای USCS
     const USCS_COLORS = {
       "GW": "#8B5A2B", "GP": "#8B5A2B",
       "SW": "#F4A460", "SP": "#F4A460",
@@ -100,402 +103,265 @@
     const layoutModeSel = document.getElementById('layoutMode');
     const modeSel = document.getElementById('modeSel');
     const colWidthInput = document.getElementById('colWidth');
+    const cutawayChk = document.getElementById('cutaway');
 
-    // ابزارهای کمکی
+    // کمکی‌ها
     function pickColor(code) {
       if (!code) return "#CCCCCC";
       const norm = String(code).toUpperCase().replace("/", "-").split("-");
-      for (const part of norm) {
-        if (USCS_COLORS[part]) return USCS_COLORS[part];
-      }
+      for (const p of norm) if (USCS_COLORS[p]) return USCS_COLORS[p];
       return "#CCCCCC";
     }
+    function parseCSV(file){return new Promise((res,rej)=>Papa.parse(file,{header:true,skipEmptyLines:true,complete:r=>res(r.data),error:rej}));}
+    function parseXLSX(file){return new Promise((res,rej)=>{const rd=new FileReader();rd.onload=e=>{const wb=XLSX.read(e.target.result,{type:'array'});const sh=wb.Sheets[wb.SheetNames[0]];res(XLSX.utils.sheet_to_json(sh,{defval:""}));};rd.onerror=rej;rd.readAsArrayBuffer(file);});}
+    async function parseFile(file){const n=(file?.name||"").toLowerCase();if(n.endsWith('.csv'))return parseCSV(file);if(n.endsWith('.xlsx')||n.endsWith('.xls'))return parseXLSX(file);throw new Error('فرمت پشتیبانی نمی‌شود (CSV/XLSX).');}
+    function normalizeKeys(row){const o={};for(const k of Object.keys(row))o[String(k).trim()]=row[k];return o;}
+    function toNumber(v){if(v===null||v===undefined||v==="")return null;const n=Number(String(v).replace(',','.'));return Number.isFinite(n)?n:null;}
+    function indexBy(arr,key){const m=new Map();for(const r of arr){const id=String(r[key]).trim();if(!m.has(id))m.set(id,[]);m.get(id).push(r);}return m;}
+    function dist(a,b){return Math.hypot(a.X-b.X,a.Y-b.Y);}
 
-    function parseCSV(file) {
-      return new Promise((resolve, reject) => {
-        Papa.parse(file, {
-          header: true,
-          skipEmptyLines: true,
-          complete: (res) => resolve(res.data),
-          error: (err) => reject(err)
-        });
-      });
-    }
-
-    function parseXLSX(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const wb = XLSX.read(e.target.result, { type: 'array' });
-          const sheetName = wb.SheetNames[0];
-          const sheet = wb.Sheets[sheetName];
-          const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
-          resolve(json);
-        };
-        reader.onerror = reject;
-        reader.readAsArrayBuffer(file);
-      });
-    }
-
-    async function parseFile(file) {
-      const name = (file?.name || "").toLowerCase();
-      if (name.endsWith('.csv')) return parseCSV(file);
-      if (name.endsWith('.xlsx') || name.endsWith('.xls')) return parseXLSX(file);
-      throw new Error('فرمت فایل پشتیبانی نمی‌شود (CSV یا XLSX).');
-    }
-
-    function normalizeKeys(row) {
-      const norm = {};
-      for (const k of Object.keys(row)) {
-        const nk = String(k).trim();
-        norm[nk] = row[k];
-      }
-      return norm;
-    }
-
-    function indexBy(arr, key) {
-      const map = new Map();
-      for (const r of arr) {
-        const id = String(r[key]).trim();
-        if (!map.has(id)) map.set(id, []);
-        map.get(id).push(r);
-      }
-      return map;
-    }
-
-    function toNumber(val) {
-      if (val === null || val === undefined || val === "") return null;
-      const num = Number(String(val).replace(',', '.'));
-      return Number.isFinite(num) ? num : null;
-    }
-
-    function dist(a, b) {
-      const dx = a.X - b.X, dy = a.Y - b.Y;
-      return Math.hypot(dx, dy);
-    }
-
-    // رویدادهای بارگذاری فایل
-    holesInput.addEventListener('change', async (e) => {
-      statusEl.textContent = 'در حال خواندن فایل گمانه‌ها...';
-      try {
-        const file = e.target.files?.[0];
-        const data = await parseFile(file);
-        state.holes = data.map(normalizeKeys);
-        statusEl.textContent = `گمانه‌ها: ${state.holes.length} رکورد`;
-      } catch (err) {
-        statusEl.textContent = 'خطا در خواندن گمانه‌ها: ' + err.message;
-      }
-      renderBtn.disabled = !(state.holes && state.layers);
+    holesInput.addEventListener('change', async (e)=>{
+      statusEl.textContent='در حال خواندن فایل گمانه‌ها...';
+      try{const f=e.target.files?.[0];const d=await parseFile(f);state.holes=d.map(normalizeKeys);statusEl.textContent=`گمانه‌ها: ${state.holes.length} رکورد`;}
+      catch(err){statusEl.textContent='خطا در خواندن گمانه‌ها: '+err.message;}
+      renderBtn.disabled=!(state.holes&&state.layers);
+    });
+    layersInput.addEventListener('change', async (e)=>{
+      statusEl.textContent='در حال خواندن فایل لایه‌ها...';
+      try{const f=e.target.files?.[0];const d=await parseFile(f);state.layers=d.map(normalizeKeys);statusEl.textContent=`لایه‌ها: ${state.layers.length} رکورد`;}
+      catch(err){statusEl.textContent='خطا در خواندن لایه‌ها: '+err.message;}
+      renderBtn.disabled=!(state.holes&&state.layers);
     });
 
-    layersInput.addEventListener('change', async (e) => {
-      statusEl.textContent = 'در حال خواندن فایل لایه‌ها...';
-      try {
-        const file = e.target.files?.[0];
-        const data = await parseFile(file);
-        state.layers = data.map(normalizeKeys);
-        statusEl.textContent = `لایه‌ها: ${state.layers.length} رکورد`;
-      } catch (err) {
-        statusEl.textContent = 'خطا در خواندن لایه‌ها: ' + err.message;
-      }
-      renderBtn.disabled = !(state.holes && state.layers);
+    renderBtn.addEventListener('click', ()=>{
+      try{renderProfile();downloadBtn.disabled=false;statusEl.textContent='رسم انجام شد.';}
+      catch(err){statusEl.textContent='❌ '+err.message;}
+    });
+    downloadBtn.addEventListener('click', async ()=>{
+      const gd=document.getElementById('plot');
+      try{await Plotly.downloadImage(gd,{format:'png',filename:'geoprofile',width:1600,height:900});}
+      catch{statusEl.textContent='خطا در دانلود تصویر';}
     });
 
-    renderBtn.addEventListener('click', () => {
-      try {
-        renderProfile();
-        downloadBtn.disabled = false;
-        statusEl.textContent = 'رسم انجام شد.';
-      } catch (err) {
-        statusEl.textContent = '❌ ' + err.message;
-      }
-    });
+    // آماده‌سازی
+    function prepareData(){
+      const holes=(state.holes||[]).map(h=>({
+        BoreholeID:String(h.BoreholeID??h.boreholeid??h.ID??h.id??"").trim(),
+        X:toNumber(h.X??h.x), Y:toNumber(h.Y??h.y),
+        Z:toNumber(h.Z??h.z??h.GroundLevel??h.groundlevel??h.Elevation??h.elevation)
+      })).filter(h=>h.BoreholeID && h.X!=null && h.Y!=null && h.Z!=null);
+      if(!holes.length) throw new Error('ستون‌های BoreholeID, X, Y, Z معتبر نیستند.');
 
-    downloadBtn.addEventListener('click', async () => {
-      const gd = document.getElementById('plot');
-      try {
-        await Plotly.downloadImage(gd, { format: 'png', filename: 'geoprofile', width: 1600, height: 900 });
-      } catch (err) {
-        statusEl.textContent = 'خطا در دانلود تصویر';
-      }
-    });
+      const holeIndex=indexBy(holes,'BoreholeID');
 
-    // آماده‌سازی داده
-    function prepareData() {
-      const holes = (state.holes || []).map(h => ({
-        BoreholeID: String(h.BoreholeID ?? h.boreholeid ?? h.ID ?? h.id ?? "").trim(),
-        X: toNumber(h.X ?? h.x),
-        Y: toNumber(h.Y ?? h.y),
-        Z: toNumber(h.Z ?? h.z ?? h.GroundLevel ?? h.groundlevel ?? h.Elevation ?? h.elevation)
-      })).filter(h => h.BoreholeID && h.X != null && h.Y != null && h.Z != null);
+      const layers=(state.layers||[]).map(r=>({
+        BoreholeID:String(r.BoreholeID??r.boreholeid??r.ID??r.id??"").trim(),
+        TopDepth_m:toNumber(r.TopDepth_m??r.topdepth_m??r.TopDepth??r.top),
+        BottomDepth_m:toNumber(r.BottomDepth_m??r.bottomdepth_m??r.BottomDepth??r.bottom),
+        USCS:String(r.USCS??r.uscs??'').trim(),
+        Description:String(r.Description??r.description??'')
+      })).filter(r=>r.BoreholeID && r.TopDepth_m!=null && r.BottomDepth_m!=null);
+      if(!layers.length) throw new Error('ستون‌های لایه‌ها معتبر نیستند.');
 
-      if (!holes.length) {
-        throw new Error('ستون‌های لازم در فایل گمانه‌ها یافت نشد. مطمئن شوید ستون‌های BoreholeID, X, Y, Z وجود دارند و مقادیر معتبر دارند.');
-      }
-
-      const holeIndex = indexBy(holes, 'BoreholeID');
-
-      const layers = (state.layers || []).map(r => ({
-        BoreholeID: String(r.BoreholeID ?? r.boreholeid ?? r.ID ?? r.id ?? "").trim(),
-        TopDepth_m: toNumber(r.TopDepth_m ?? r.topdepth_m ?? r.TopDepth ?? r.top),
-        BottomDepth_m: toNumber(r.BottomDepth_m ?? r.bottomdepth_m ?? r.BottomDepth ?? r.bottom),
-        USCS: String(r.USCS ?? r.uscs ?? '').trim(),
-        Description: String(r.Description ?? r.description ?? '')
-      })).filter(r => r.BoreholeID && r.TopDepth_m != null && r.BottomDepth_m != null);
-
-      if (!layers.length) {
-        throw new Error('ستون‌های لازم در فایل لایه‌ها یافت نشد. مطمئن شوید ستون‌های BoreholeID, TopDepth_m, BottomDepth_m وجود دارند.');
-      }
-
-      const df = [];
-      for (const lay of layers) {
-        const hole = (holeIndex.get(lay.BoreholeID) || [])[0];
-        if (!hole) continue;
-        const Z = hole.Z;
+      const df=[];
+      for(const lay of layers){
+        const hole=(holeIndex.get(lay.BoreholeID)||[])[0];
+        if(!hole) continue;
+        const Z=hole.Z;
         df.push({
-          BoreholeID: lay.BoreholeID,
-          X: hole.X, Y: hole.Y, Z,
-          TopDepth_m: lay.TopDepth_m, BottomDepth_m: lay.BottomDepth_m,
-          USCS: lay.USCS, Description: lay.Description,
+          BoreholeID:lay.BoreholeID, X:hole.X, Y:hole.Y, Z,
+          TopDepth_m:lay.TopDepth_m, BottomDepth_m:lay.BottomDepth_m,
+          USCS:lay.USCS, Description:lay.Description,
           TopZ: Z - lay.TopDepth_m,
           BotZ: Z - lay.BottomDepth_m
         });
       }
-
-      if (!df.length) throw new Error('هیچ لایه‌ای با گمانه‌های معرفی‌شده تطابق پیدا نکرد.');
-      return { holes, df };
+      if(!df.length) throw new Error('هیچ لایه‌ای با گمانه‌ها تطبیق داده نشد.');
+      return {holes, df};
     }
 
-    // ترتیب chainage با نزدیک‌ترین همسایه
-    function orderByNearestNeighbor(holes) {
-      if (holes.length <= 2) return holes.map(h => h.BoreholeID);
-      // شروع از چپ‌ترین (کمینه X؛ در تساوی، کمینه Y)
-      let startIdx = 0;
-      for (let i = 1; i < holes.length; i++) {
-        if (holes[i].X < holes[startIdx].X || (holes[i].X === holes[startIdx].X && holes[i].Y < holes[startIdx].Y)) {
-          startIdx = i;
-        }
-      }
-      const visited = new Set();
-      const order = [];
-      let current = holes[startIdx];
-      visited.add(current.BoreholeID);
-      order.push(current.BoreholeID);
-
-      for (let step = 1; step < holes.length; step++) {
-        let best = null, bestD = Infinity;
-        for (const h of holes) {
-          if (visited.has(h.BoreholeID)) continue;
-          const d = dist(current, h);
-          if (d < bestD) { bestD = d; best = h; }
-        }
-        if (!best) break;
-        visited.add(best.BoreholeID);
-        order.push(best.BoreholeID);
-        current = best;
-      }
-      for (const h of holes) if (!visited.has(h.BoreholeID)) order.push(h.BoreholeID);
+    // ترتیب chainage
+    function orderByNearestNeighbor(holes){
+      if(holes.length<=2) return holes.map(h=>h.BoreholeID);
+      let s=0;for(let i=1;i<holes.length;i++){if(holes[i].X<holes[s].X||(holes[i].X===holes[s].X&&holes[i].Y<holes[s].Y))s=i;}
+      const vis=new Set(), order=[];let cur=holes[s];vis.add(cur.BoreholeID);order.push(cur.BoreholeID);
+      for(let k=1;k<holes.length;k++){let best=null,bd=Infinity;for(const h of holes){if(vis.has(h.BoreholeID))continue;const d=dist(cur,h);if(d<bd){bd=d;best=h;}}
+        if(!best)break;vis.add(best.BoreholeID);order.push(best.BoreholeID);cur=best;}
+      for(const h of holes) if(!vis.has(h.BoreholeID)) order.push(h.BoreholeID);
       return order;
     }
 
-    // رسم ۲بعدی با عمق منفی (y=-depth)
-    function render2D(holes, df) {
-      const mode = layoutModeSel.value; // x, y, chainage
+    // ۲بعدی: y = -depth
+    function render2D(holes, df){
+      const mode=layoutModeSel.value; // x,y,chainage
+      let orderedIDs = (mode==='chainage')
+        ? orderByNearestNeighbor(holes)
+        : holes.slice().sort((a,b)=>mode==='y'?(a.Y-b.Y):(a.X-b.X)).map(h=>h.BoreholeID);
 
-      // ترتیب گمانه‌ها روی محور افقی
-      let orderedIDs;
-      if (mode === 'chainage') {
-        orderedIDs = orderByNearestNeighbor(holes);
-      } else {
-        orderedIDs = holes
-          .slice()
-          .sort((a,b) => mode === 'y' ? (a.Y - b.Y) : (a.X - b.X))
-          .map(h => h.BoreholeID);
-      }
-
-      // موقعیت افقی نمایش
-      const chainages = new Map();
-      const minX = Math.min(...holes.map(h => h.X));
-      const minY = Math.min(...holes.map(h => h.Y));
-
-      let accum = 0;
-      let prev = null;
-      for (const id of orderedIDs) {
-        const h = holes.find(v => v.BoreholeID === id);
+      const chainages=new Map();
+      const minX=Math.min(...holes.map(h=>h.X));
+      const minY=Math.min(...holes.map(h=>h.Y));
+      let accum=0, prev=null;
+      for(const id of orderedIDs){
+        const h=holes.find(v=>v.BoreholeID===id);
         let pos;
-        if (mode === 'x') pos = h.X - minX;
-        else if (mode === 'y') pos = h.Y - minY;
-        else {
-          if (!prev) { pos = 0; }
-          else { accum += dist(prev, h); pos = accum; }
-          prev = h;
-        }
-        chainages.set(id, pos);
+        if(mode==='x') pos=h.X-minX;
+        else if(mode==='y') pos=h.Y-minY;
+        else { pos = prev ? (accum += dist(prev,h)) : 0; prev=h; }
+        chainages.set(id,pos);
       }
 
-      const traces = [];
-      const width = Math.max(5, Math.min(50, Number(colWidthInput.value) || 10));
+      const traces=[];
+      const width=Math.max(5,Math.min(50,Number(colWidthInput.value)||10));
+      let minNegDepth=0;
 
-      // پایین‌ترین عمق (منفی‌ترین y)
-      let minNegDepth = 0;
+      for(const id of orderedIDs){
+        const grp=df.filter(d=>d.BoreholeID===id).sort((a,b)=>a.TopDepth_m-b.TopDepth_m);
+        if(!grp.length) continue;
+        const x=chainages.get(id);
 
-      for (const id of orderedIDs) {
-        const group = df.filter(d => d.BoreholeID === id).sort((a,b) => a.TopDepth_m - b.TopDepth_m);
-        if (!group.length) continue;
-        const x = chainages.get(id);
+        // خط زمین y=0
+        traces.push({x:[x-width/2,x+width/2], y:[0,0], mode:'lines', line:{color:'black'}, hoverinfo:'skip', showlegend:false});
 
-        // خط تراز دهانه (y=0)
-        traces.push({
-          x: [x - width/2, x + width/2],
-          y: [0, 0],
-          mode: 'lines',
-          line: { color: 'black' },
-          hoverinfo: 'skip',
-          showlegend: false
-        });
-
-        // لایه‌ها با y منفی
-        for (const row of group) {
+        for(const row of grp){
           const yTop = -row.TopDepth_m;
           const yBot = -row.BottomDepth_m;
-          if (yBot < minNegDepth) minNegDepth = yBot;
-
-          const color = pickColor(row.USCS);
-          const xx = [x - width/2, x + width/2, x + width/2, x - width/2, x - width/2];
-          const yy = [yTop, yTop, yBot, yBot, yTop];
+          if(yBot < minNegDepth) minNegDepth = yBot;
 
           traces.push({
-            x: xx, y: yy, mode: 'lines', fill: 'toself',
-            line: { color: 'rgba(0,0,0,0.25)' },
-            fillcolor: color,
+            x:[x-width/2,x+width/2,x+width/2,x-width/2,x-width/2],
+            y:[yTop,yTop,yBot,yBot,yTop],
+            mode:'lines', fill:'toself',
+            line:{color:'rgba(0,0,0,0.25)'},
+            fillcolor: pickColor(row.USCS),
             name: row.USCS,
             hovertemplate:
-              `گمانه: ${row.BoreholeID}<br>` +
-              `USCS: ${row.USCS}<br>` +
-              `Top depth: ${row.TopDepth_m} m (y=${yTop})<br>` +
-              `Bottom depth: ${row.BottomDepth_m} m (y=${yBot})<br>` +
-              `TopZ: ${row.TopZ} / BottomZ: ${row.BotZ}<br>` +
+              `گمانه: ${row.BoreholeID}<br>`+
+              `USCS: ${row.USCS}<br>`+
+              `Top depth: ${row.TopDepth_m} m (y=${yTop})<br>`+
+              `Bottom depth: ${row.BottomDepth_m} m (y=${yBot})<br>`+
+              `TopZ: ${row.TopZ} / BottomZ: ${row.BotZ}<br>`+
               `شرح: ${row.Description}<extra></extra>`,
-            showlegend: false
+            showlegend:false
           });
         }
       }
 
-      // اگر کسی بخواهد «۱ بالا» هم داشته باشد، می‌توان محدوده را [1, minNegDepth] گذاشت.
-      // این‌جا به‌صورت خودکار یک «کوچک بالای صفر» هم اضافه می‌کنیم تا عدد 1 قابل دید باشد.
-      const topTick = 1; // ۱ متر بالای صفر
-      const yRangeTop = Math.max(0, topTick);
-      const layout = {
-        title: 'GeoProfile - 2D (عمق منفی رو به پایین)',
-        xaxis: { title: mode === 'chainage' ? 'Chainage (m)' : (mode === 'y' ? 'Y' : 'X') },
-        yaxis: {
-          title: 'Depth (m, negative downward)',
-          autorange: false,
-          range: [yRangeTop, minNegDepth], // مثال: [1, -7] → ۱ بالا، ۷- پایین
-          zeroline: true,
-          zerolinewidth: 2
+      const layout={
+        title:'GeoProfile - 2D (Depth downward)',
+        xaxis:{ title: mode==='chainage'?'Chainage (m)':(mode==='y'?'Y':'X') },
+        yaxis:{
+          title:'Depth (m, negative downward)',
+          autorange:false,
+          range:[1, minNegDepth], // مثال: [1,-7] ⇒ ۱ بالا، ۷- پایین
+          zeroline:true, zerolinewidth:2
         },
-        template: 'plotly_white',
-        margin: { l: 70, r: 20, t: 50, b: 60 }
+        template:'plotly_white',
+        margin:{ l:70, r:20, t:50, b:60 }
       };
-
-      Plotly.newPlot('plot', traces, layout, { responsive: true });
+      Plotly.newPlot('plot', traces, layout, {responsive:true});
     }
 
-    // ساخت منشور برای ۳D (نمای Z واقعی؛ z معکوس می‌شود تا عمق رو به پایین دیده شود)
-    function makePrismMesh(X, Y, w, TopZ, BotZ, color, name, hover) {
-      const half = w / 2;
-      const x = [
-        X - half, X + half, X + half, X - half,  // top face
-        X - half, X + half, X + half, X - half   // bottom face
-      ];
-      const y = [
-        Y - half, Y - half, Y + half, Y + half,
-        Y - half, Y - half, Y + half, Y + half
-      ];
-      const z = [
-        TopZ, TopZ, TopZ, TopZ,
-        BotZ, BotZ, BotZ, BotZ
-      ];
-      // مثلث‌بندی وجوه
-      const i = [0,1,2, 0,2,3,  4,5,6, 4,6,7,  0,1,5, 0,5,4,  1,2,6, 1,6,5,  2,3,7, 2,7,6,  3,0,4, 3,4,7];
-      const j = [1,2,3, 2,3,0,  5,6,7, 6,7,4,  1,5,4, 5,4,0,  2,6,5, 6,5,1,  3,7,6, 7,6,2,  0,4,7, 4,7,3];
-      const k = [2,3,0, 3,0,1,  6,7,4, 7,4,5,  5,4,0, 4,0,1,  6,5,1, 5,1,2,  7,6,2, 6,2,3,  4,7,3, 7,3,0];
+    // ۳بعدی: فقط زیر z=0 + برش نمایشی
+    function makePrismMeshCut(X,Y,w,TopZ,BotZ,color,name,hover,cutOpen){
+      const half=w/2;
+      // footprint مستطیل
+      const x=[X-half, X+half, X+half, X-half,  X-half, X+half, X+half, X-half];
+      const y=[Y-half, Y-half, Y+half, Y+half,  Y-half, Y-half, Y+half, Y+half];
+      const z=[TopZ,TopZ,TopZ,TopZ,  BotZ,BotZ,BotZ,BotZ];
 
-      return {
-        type: 'mesh3d',
-        x, y, z, i, j, k,
-        name,
-        hovertemplate: hover,
-        showscale: false,
-        opacity: 0.96,
-        color
+      // مثلث‌ها: همه‌ی وجوه بجز سمت +Y برای ایجاد «قاچ باز»
+      const tris = {
+        top:    [[0,1,2],[0,2,3]],
+        bottom: [[4,5,6],[4,6,7]],
+        side1:  [[0,1,5],[0,5,4]], // -Y
+        side2:  cutOpen ? [] : [[1,2,6],[1,6,5]], // +Y (حذف برای برش)
+        side3:  [[2,3,7],[2,7,6]],
+        side4:  [[3,0,4],[3,4,7]]
       };
+      const i=[],j=[],k=[];
+      for(const face of Object.values(tris)) for(const t of face){i.push(t[0]);j.push(t[1]);k.push(t[2]);}
+
+      return {type:'mesh3d', x,y,z,i,j,k, name, hovertemplate:hover, showscale:false, opacity:0.96, color};
     }
 
-    // رسم ۳بعدی (Z واقعی با محور z معکوس برای نمایش عمق رو به پایین)
-    function render3D(holes, df) {
-      const width = Math.max(1, Math.min(50, Number(colWidthInput.value) || 10));
-      const traces = [];
+    function render3D(holes, df){
+      const width=Math.max(1,Math.min(50,Number(colWidthInput.value)||10));
+      const cutOpen = !!cutawayChk.checked;
+      const traces=[];
+
+      // صفحه‌ی زمین (z=0)
+      const xs=holes.map(h=>h.X), ys=holes.map(h=>h.Y);
+      const pad=width*2;
+      const minX=Math.min(...xs)-pad, maxX=Math.max(...xs)+pad;
+      const minY=Math.min(...ys)-pad, maxY=Math.max(...ys)+pad;
+      traces.push({
+        type:'surface',
+        x:[[minX,maxX],[minX,maxX]],
+        y:[[minY,minY],[maxY,maxY]],
+        z:[[0,0],[0,0]],
+        opacity:0.35,
+        showscale:false,
+        colorscale:[[0,'#777'],[1,'#777']],
+        name:'Ground (z=0)',
+        hoverinfo:'skip'
+      });
 
       // محل گمانه‌ها
-      for (const h of holes) {
+      for (const h of holes){
         traces.push({
-          type: 'scatter3d',
-          x: [h.X],
-          y: [h.Y],
-          z: [h.Z],
-          mode: 'markers+text',
-          marker: { size: 3, color: 'black' },
-          text: [h.BoreholeID],
-          textposition: 'top center',
-          name: 'Borehole',
-          showlegend: false,
-          hovertemplate: `Borehole: ${h.BoreholeID}<br>X:${h.X} Y:${h.Y} Z:${h.Z}<extra></extra>`
+          type:'scatter3d', x:[h.X], y:[h.Y], z:[h.Z],
+          mode:'markers+text', marker:{size:3, color:'black'},
+          text:[h.BoreholeID], textposition:'top center',
+          name:'Borehole', showlegend:false,
+          hovertemplate:`Borehole: ${h.BoreholeID}<br>X:${h.X} Y:${h.Y} Z:${h.Z}<extra></extra>`
         });
       }
 
-      // منشور لایه‌ها
-      const byBH = Array.from(new Set(df.map(d => d.BoreholeID)));
-      for (const id of byBH) {
-        const group = df.filter(d => d.BoreholeID === id).sort((a,b) => a.TopDepth_m - b.TopDepth_m);
-        if (!group.length) continue;
-        const X = group[0].X, Y = group[0].Y;
-        for (const row of group) {
-          const color = pickColor(row.USCS);
-          const hover =
-            `Borehole: ${row.BoreholeID}<br>` +
-            `USCS: ${row.USCS}<br>` +
-            `TopZ: ${row.TopZ} m<br>` +
-            `BottomZ: ${row.BotZ} m<br>` +
-            `Top depth: ${row.TopDepth_m} m<br>` +
-            `Bottom depth: ${row.BottomDepth_m} m<br>` +
+      // منشور لایه‌ها (کات در z=0)
+      const byBH=[...new Set(df.map(d=>d.BoreholeID))];
+      for(const id of byBH){
+        const grp=df.filter(d=>d.BoreholeID===id).sort((a,b)=>a.TopDepth_m-b.TopDepth_m);
+        if(!grp.length) continue;
+        const X=grp[0].X, Y=grp[0].Y;
+        for(const row of grp){
+          // فقط زیرزمین:
+          const top=Math.min(row.TopZ, 0);
+          const bot=Math.min(row.BotZ, 0);
+          if(bot===top) continue; // تماماً بالای زمین
+          const color=pickColor(row.USCS);
+          const hover=
+            `Borehole: ${row.BoreholeID}<br>`+
+            `USCS: ${row.USCS}<br>`+
+            `TopZ: ${top} m<br>`+
+            `BottomZ: ${bot} m<br>`+
+            `Top depth: ${row.TopDepth_m} m<br>`+
+            `Bottom depth: ${row.BottomDepth_m} m<br>`+
             `Desc: ${row.Description}<extra></extra>`;
-          traces.push(makePrismMesh(X, Y, width, row.TopZ, row.BotZ, color, row.USCS, hover));
+          traces.push(makePrismMeshCut(X,Y,width,top,bot,color,row.USCS,hover,cutOpen));
         }
       }
 
-      const layout = {
-        title: 'GeoProfile - 3D (Z axis, عمق رو به پایین)',
-        scene: {
-          xaxis: { title: 'X (m)' },
-          yaxis: { title: 'Y (m)' },
-          zaxis: { title: 'Z (m relative to map zero)', autorange: 'reversed' },
-          aspectmode: 'data',
-          camera: { eye: { x: 1.6, y: 1.6, z: 0.9 } }
+      const layout={
+        title:'GeoProfile - 3D (Subsurface cutaway)',
+        scene:{
+          xaxis:{ title:'X (m)' },
+          yaxis:{ title:'Y (m)' },
+          zaxis:{ title:'Z (m relative to map zero)', autorange:'reversed' }, // رو به پایین
+          aspectmode:'data',
+          camera:{ eye:{ x:1.6, y:1.6, z:0.9 } }
         },
-        margin: { l: 0, r: 0, t: 50, b: 0 },
-        template: 'plotly_white'
+        margin:{ l:0, r:0, t:50, b:0 },
+        template:'plotly_white'
       };
-
-      Plotly.newPlot('plot', traces, layout, { responsive: true });
+      Plotly.newPlot('plot', traces, layout, {responsive:true});
     }
 
-    // سوییچ حالت و رسم
-    function renderProfile() {
-      const { holes, df } = prepareData();
-      const mode = modeSel.value;
-      if (mode === '2d') render2D(holes, df);
+    // سوییچ حالت
+    function renderProfile(){
+      const {holes, df}=prepareData();
+      const mode=modeSel.value;
+      if(mode==='2d') render2D(holes, df);
       else render3D(holes, df);
     }
   </script>
